@@ -2,8 +2,8 @@
 
 > A production deployment case study: migrating a maritime port operations web portal from AWS cloud to a hardened, high-availability on-premises infrastructure at a major West African seaport.
 
-**Role:** DevOps / Infrastructure Engineer  
-**Environment:** On-premises RHEL 9.4 + AWS EC2  
+**Role:** TechOps Engineer (DevOps & SRE)
+**Environment:** On-premises RHEL 9.4 + AWS EC2
 **Status:** Production
 
 ---
@@ -15,6 +15,7 @@
 - [Infrastructure Stack](#infrastructure-stack)
 - [Server Topology](#server-topology)
 - [Service Configuration Deep Dives](#service-configuration-deep-dives)
+- [Observability Stack](#observability-stack)
 - [Network & Proxy Design](#network--proxy-design)
 - [Security Hardening](#security-hardening)
 - [Key Lessons Learned](#key-lessons-learned)
@@ -32,7 +33,7 @@ The work covered:
 - Deploying a Flutter web frontend, Go REST API, and Keycloak 26.x identity server across a high-availability pair of RHEL 9.4 nodes
 - Building an Nginx load balancer with SSL termination
 - Configuring a reverse proxy cluster bridging the app network to the port's internal terminal management network
-- Setting up Grafana + Prometheus monitoring across all nodes
+- Deploying a full observability stack — metrics, logs, alerting, and uptime monitoring across all 7 nodes
 - Hardening Nginx across on-prem and legacy cloud VMs ahead of a penetration test
 
 ---
@@ -62,6 +63,7 @@ The work covered:
                        │                      │
             ┌──────────▼──────────────────────▼──────────────┐
             │            PostgreSQL 15 — Primary (R/W)        │
+            │         + Monitoring Stack (Docker)             │
             └────────────────────┬───────────────────────────┘
                                  │ Streaming replication
             ┌────────────────────▼───────────────────────────┐
@@ -90,7 +92,7 @@ The work covered:
 | Cache | Redis 7 | Password-protected |
 | Load Balancer | Nginx | HTTPS, self-signed SSL, upstream round-robin |
 | N4 Proxy | Nginx | Cross-subnet reverse proxy to terminal management system |
-| Monitoring | Grafana + Prometheus | All nodes instrumented |
+| Monitoring | Grafana · Prometheus · Loki · Alertmanager · Uptime Kuma | Full stack — see Observability section |
 | OS | RHEL 9.4 | SELinux enforcing |
 | Containers | Docker + Docker Compose | Private registry, all services containerised |
 
@@ -109,7 +111,7 @@ The work covered:
 |---|---|---|
 | App Nodes (HA pair) | 2 | Keycloak, Go Backend, Redis, Nginx (Flutter frontend) |
 | N4 Proxy Nodes (HA pair) | 2 | Nginx reverse proxy to terminal management system |
-| Database Primary | 1 | PostgreSQL 15 — read/write |
+| Database Primary | 1 | PostgreSQL 15 — read/write + monitoring stack |
 | Database Replica | 1 | PostgreSQL 15 — streaming replica, read-only |
 | Load Balancer | 1 | Nginx HTTPS, SSL termination, Keycloak admin proxy |
 | **Total on-prem nodes** | **7** | |
@@ -228,6 +230,94 @@ location ~* \.(js|css|png|jpg|woff2)$ {
 
 ---
 
+## Observability Stack
+
+A full observability stack was deployed on the database primary node, collecting metrics, logs, and uptime data from all 7 on-premises servers.
+
+### Tools Deployed
+
+| Tool | Purpose | Port |
+|---|---|---|
+| Prometheus | Metrics collection and storage (30-day retention) | 9090 |
+| Grafana | Dashboards and visualisation | 3000 |
+| Alertmanager | Alert routing via email/webhook | 9093 |
+| Loki | Log aggregation from all servers | 3100 |
+| Promtail | Log shipping agent (runs on each node) | — |
+| cAdvisor | Docker container metrics | 8090 |
+| Node Exporter | Host CPU, memory, disk, network metrics | 9100 |
+| PostgreSQL Exporter | DB queries, connections, replication lag, locks | 9187 |
+| Redis Exporter | Redis memory, connections, hit rate | 9121 / 9122 |
+| Nginx Exporter | Request rates, error rates, active connections | 9113 / 9114 |
+| Uptime Kuma | Endpoint uptime monitoring with alerting | 3001 |
+
+### Architecture
+
+```
+  ┌─────────────────────────────────────────────────────────────┐
+  │                   All 7 On-Prem Nodes                       │
+  │  Node Exporter :9100  ·  cAdvisor :8090  ·  Promtail       │
+  │  + service-specific exporters per node                      │
+  └──────────────────────┬──────────────────────────────────────┘
+                         │ scrape / ship logs
+  ┌──────────────────────▼──────────────────────────────────────┐
+  │              Monitoring Stack (DB Primary Node)             │
+  │                                                             │
+  │  Prometheus ──► Alertmanager ──► Email / Webhook           │
+  │       │                                                     │
+  │       ▼                                                     │
+  │  Grafana ◄── Loki (logs) ◄── Promtail agents               │
+  │                                                             │
+  │  Uptime Kuma ──► endpoint checks ──► alerts                │
+  └─────────────────────────────────────────────────────────────┘
+```
+
+### Exporters Installed Per Node
+
+| Node | Exporters |
+|---|---|
+| App Nodes (.21, .22) | Node Exporter, cAdvisor, Nginx Exporter, Redis Exporter, Promtail |
+| N4 Proxy Nodes (.23, .24) | Node Exporter, cAdvisor, Nginx Exporter, Promtail |
+| DB Primary (.25) | Node Exporter, cAdvisor, PostgreSQL Exporter, Promtail + full monitoring stack |
+| DB Replica (.26) | Node Exporter, PostgreSQL Exporter, Promtail |
+| Load Balancer (.27) | Node Exporter, Nginx Exporter, Promtail |
+
+### Nginx Stub Status (Required for Nginx Exporter)
+
+Added to Nginx config on app nodes to expose metrics endpoint:
+
+```nginx
+location /stub_status {
+    stub_status;
+    allow 172.20.0.0/16;   # internal network only
+    deny all;
+}
+```
+
+### Grafana Dashboards
+
+Pre-built dashboards imported from Grafana's dashboard library:
+
+| Dashboard | ID |
+|---|---|
+| Node Exporter Full (host metrics) | 1860 |
+| Docker and system monitoring | 893 |
+| PostgreSQL Database | 9628 |
+| Redis Dashboard | 763 |
+| Nginx Exporter | 12708 |
+
+### Alerting
+
+Alertmanager configured with alert rules covering:
+
+- Host down / unreachable
+- High CPU / memory / disk usage
+- PostgreSQL connection saturation and replication lag
+- Redis memory pressure
+- Nginx error rate spikes
+- Container restarts
+
+---
+
 ## Network & Proxy Design
 
 ### Cross-Subnet Routing to Terminal Management System
@@ -313,12 +403,11 @@ Always run `setsebool -P httpd_can_network_connect 1` when Nginx needs to proxy 
 ### 10. RHEL aliases `cp` to `cp -i` — this breaks automation scripts
 Add `unalias cp 2>/dev/null` at the top of any script that copies files, or scripts will hang waiting for interactive input.
 
-
 ---
 
 ## Tech Stack
 
-`Flutter Web` · `Go` · `Keycloak 26.x` · `PostgreSQL 15` · `Redis 7` · `Nginx` · `Docker` · `Docker Compose` · `Grafana` · `Prometheus` · `RHEL 9.4` · `AWS EC2` · `N4/Navis`
+`Flutter Web` · `Go` · `Keycloak 26.x` · `PostgreSQL 15` · `Redis 7` · `Nginx` · `Docker` · `Docker Compose` · `Prometheus` · `Grafana` · `Loki` · `Alertmanager` · `Uptime Kuma` · `cAdvisor` · `Node Exporter` · `RHEL 9.4` · `AWS EC2` · `N4/Navis`
 
 ---
 
