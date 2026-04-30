@@ -3,7 +3,9 @@
 > A production deployment case study: migrating a maritime port operations web portal from AWS cloud to a hardened, high-availability on-premises infrastructure at a major West African seaport.
 
 **Role:** TechOps Engineer (DevOps & SRE)
+
 **Environment:** On-premises RHEL 9.4 + AWS EC2
+
 **Status:** Production
 
 ---
