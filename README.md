@@ -313,19 +313,6 @@ Always run `setsebool -P httpd_can_network_connect 1` when Nginx needs to proxy 
 ### 10. RHEL aliases `cp` to `cp -i` — this breaks automation scripts
 Add `unalias cp 2>/dev/null` at the top of any script that copies files, or scripts will hang waiting for interactive input.
 
----
-
-## Known Residual Risks
-
-| Issue | Priority |
-|---|---|
-| Terminal management system user provisioning incomplete — some endpoints return 500 | 🔴 High |
-| N4 proxy static route not yet persisted via `nmcli` | 🟡 Medium |
-| SSL certificate on Cloud VM 1 expiring imminently | 🔴 High |
-| Cloud VM 1 — Ubuntu 18.04 end of life | 🔴 High |
-| Cloud VM 2 — Ubuntu 16.04 + PHP 7.0 end of life | 🔴 High |
-| Cloud VM 2 — HAProxy 3DES ciphers (SWEET32 vulnerability) | 🟡 Medium |
-| Keycloak custom token claims configuration incomplete | 🟡 Medium |
 
 ---
 
